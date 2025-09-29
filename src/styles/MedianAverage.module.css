@@ -1,0 +1,91 @@
+/* src/styles/components/MedianAverage.module.css */
+
+.container {
+  display: flex;
+  gap: 24px;
+  margin-bottom: 24px;
+}
+
+.metricBox {
+  flex: 1;
+  background: #f3f0ff;
+  border-radius: 12px;
+  padding: 20px 24px;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
+}
+
+.title {
+  font-size: 18px;
+  font-weight: 600;
+  color: #362C67;
+  margin-bottom: 20px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.priceGrid {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.priceRow {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px 0;
+  border-bottom: 1px solid rgba(54, 44, 103, 0.1);
+}
+
+.priceRow:last-child {
+  border-bottom: none;
+}
+
+.networkColumn {
+  flex: 1;
+  text-align: center;
+}
+
+.networkLabel {
+  font-size: 12px;
+  font-weight: 500;
+  color: #6b7280;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 8px;
+}
+
+.priceValue {
+  font-size: 24px;
+  font-weight: 700;
+  margin: 0;
+}
+
+.priceValue.outOfNetwork {
+  color: #007CA3;
+}
+
+.priceValue.inNetwork {
+  color: #D63D0A;
+}
+
+/* Responsive Design */
+@media (max-width: 768px) {
+  .container {
+    flex-direction: column;
+    gap: 16px;
+  }
+  
+  .metricBox {
+    padding: 16px 20px;
+  }
+  
+  .title {
+    font-size: 16px;
+  }
+  
+  .priceValue {
+    font-size: 20px;
+  }
+}

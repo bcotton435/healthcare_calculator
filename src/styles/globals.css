@@ -1,0 +1,96 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Typography System */
+:root {
+  --font-primary: 'Roboto', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --font-size-xs: 12px;
+  --font-size-sm: 14px;
+  --font-size-base: 16px;
+  --font-size-lg: 18px;
+  --font-size-xl: 20px;
+  --font-size-2xl: 24px;
+  
+  /* Brand Colors (from your constants) */
+  --color-primary: #362C67;
+  --color-teal: #007CA3;
+  --color-red: #D63D0A;
+  --color-green: #197310;
+  --color-yellow: #ffeb99;
+  --color-bg: #E6E9F8;
+  --color-white: #ffffff;
+  --color-gray-light: #f5f5f5;
+  --color-gray-border: #e0e0e0;
+}
+
+/* Reset & Base */
+* {
+  box-sizing: border-box;
+}
+
+body {
+  font-family: var(--font-primary);
+  background-color: var(--color-bg);
+  margin: 0;
+  padding: 0;
+}
+
+/* Make text white on dark purple backgrounds */
+.bg-purple-700,
+.bg-indigo-800,
+.bg-purple-900,
+[class*="bg-purple"],
+[class*="bg-indigo"] {
+  color: white !important;
+}
+
+/* Target common purple background patterns */
+div[style*="#362C67"],
+div[style*="rgb(54, 44, 103)"],
+div[style*="purple"] {
+  color: white !important;
+}
+
+/* Force all child elements to be white */
+.bg-purple-700 *,
+.bg-indigo-800 *,
+.bg-purple-900 *,
+[class*="bg-purple"] *,
+[class*="bg-indigo"] *,
+div[style*="#362C67"] *,
+div[style*="rgb(54, 44, 103)"] * {
+  color: white !important;
+}
+
+/* Specific targeting for tab content purple sections */
+.tab-content .bg-purple-700,
+.tab-content .bg-indigo-800,
+.tab-content [class*="purple"] {
+  color: white !important;
+}
+
+.tab-content .bg-purple-700 *,
+.tab-content .bg-indigo-800 *,
+.tab-content [class*="purple"] * {
+  color: white !important;
+}
+
+/* Add left padding to text inside colored sections without affecting backgrounds */
+.bg-purple-700 > *,
+.bg-indigo-800 > *,
+.bg-purple-900 > *,
+[class*="bg-purple"] > *,
+[class*="bg-indigo"] > * {
+  padding-left: 26px;
+}
+
+/* Keep the colored backgrounds edge-to-edge */
+.bg-purple-700,
+.bg-indigo-800,
+.bg-purple-900,
+[class*="bg-purple"],
+[class*="bg-indigo"] {
+  padding-left: 0;
+  margin-left: 0;
+}

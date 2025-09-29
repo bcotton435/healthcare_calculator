@@ -1,0 +1,51 @@
+/* src/styles/components/TabNavigation.module.css */
+
+.tabContainer {
+  background: #E6E9F8;  /* Light purple background that shows in gaps */
+  display: flex;
+  width: 100%;
+  gap: 10px;  /* 10px gap between tabs */
+  padding: 0;
+}
+
+.tabButton {
+  flex: 1;
+  padding: 14px 20px;
+  background: white;
+  border: none;
+  color: #362C67;  /* Dark purple text */
+  font-family: 'Roboto', sans-serif;
+  font-size: 15px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s;
+  text-align: center;
+  white-space: nowrap;
+}
+
+.tabButton:last-child {
+  /* No special styling needed */
+}
+
+.tabButton:hover:not(.active) {
+  background: #f8f7fc;  /* Very light purple on hover */
+}
+
+.tabButton.active {
+  background: #362C67;  /* Dark purple background */
+  color: white;  /* White text */
+  position: relative;
+}
+
+/* Remove bottom border effect for active state */
+.tabButton.active::after {
+  display: none;
+}
+
+/* Responsive */
+@media (max-width: 768px) {
+  .tabButton {
+    padding: 12px 16px;
+    font-size: 14px;
+  }
+}
