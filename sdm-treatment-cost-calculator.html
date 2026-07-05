@@ -1,0 +1,519 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>FAIR Health — Shared Decision Making: Treatment Cost Calculator</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #E8EAF6; }
+    @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script>
+    const { useState, useRef, useEffect, createElement: h, Fragment } = React;
+
+    /* ── Icons (shared with the main calculator) ── */
+    const ChevronDown = ({ size, color, style }) =>
+      h('svg', { width: size, height: size, viewBox: '0 0 24 24', fill: 'none', stroke: color, strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round', style }, h('polyline', { points: '6 9 12 15 18 9' }));
+    const Plus = ({ size, color }) =>
+      h('svg', { width: size, height: size, viewBox: '0 0 24 24', fill: 'none', stroke: color || 'currentColor', strokeWidth: 2.5, strokeLinecap: 'round', strokeLinejoin: 'round' }, h('line', { x1: 12, y1: 5, x2: 12, y2: 19 }), h('line', { x1: 5, y1: 12, x2: 19, y2: 12 }));
+    const Info = ({ size, color, style }) =>
+      h('svg', { width: size, height: size, viewBox: '0 0 24 24', fill: 'none', stroke: color || 'currentColor', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round', style },
+        h('circle', { cx: '12', cy: '12', r: '10' }), h('line', { x1: '12', y1: '16', x2: '12', y2: '12' }), h('line', { x1: '12', y1: '8', x2: '12.01', y2: '8' }));
+    const AlertTriangle = ({ size, color, style }) =>
+      h('svg', { width: size, height: size, viewBox: '0 0 24 24', fill: 'none', stroke: color, strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round', style },
+        h('path', { d: 'M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z' }),
+        h('line', { x1: '12', y1: '9', x2: '12', y2: '13' }), h('line', { x1: '12', y1: '17', x2: '12.01', y2: '17' }));
+
+    const C = {
+      purple: '#3C3489', purpleTint: '#EDE9F5', purpleDeep: '#2A2566', purpleLight: '#4F4FAB',
+      teal: '#0891B2', tealTint: '#E6F4F7',
+      terra: '#D14A2D', terraTint: '#FBEDE8',
+      green: '#488A3A', greenTint: '#ECF4EA',
+      page: '#E8EAF6', ink: '#1F2330', inkSoft: '#5A5F73', line: '#D8DAE8',
+      // Network-tier accents (per brand decision): in-network = red, out-of-network/billed = teal.
+      inn: '#D14A2D', innTint: '#FBEDE8',
+      oon: '#007CA3', oonTint: '#E3F1F6',
+    };
+    const FONT = '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif';
+    const fmt = (n) => '$' + Math.round(n).toLocaleString('en-US');
+    const fmtN = (n) => (n == null ? 'N/A' : fmt(n));
+
+    /* ── Demo scenario: Fast-growing prostate cancer → open surgery, outpatient, ZIP 10036 ──
+       Percentile curves are generated from a single 60th-percentile anchor using the
+       billed-charge curve shape from the main calculator. Illustrative only —
+       TODO: replace with real FAIR Health benchmark tables per line item. */
+    const SCENARIO = {
+      condition: 'Fast Growing Prostate Cancer',
+      treatment: 'Surgery — Open Surgery, Outpatient',
+      location: 'New York, NY 10036',
+    };
+    const PCTS = [20, 30, 40, 50, 60, 70, 80, 90];
+    const SHAPE = { 20: 0.532, 30: 0.703, 40: 0.876, 50: 0.959, 60: 1.000, 70: 1.105, 80: 1.267, 90: 1.519 };
+    const curve = (v60) => Object.fromEntries(PCTS.map(p => [p, Math.round(v60 * SHAPE[p])]));
+
+    /* Line-item schema: id, name, desc, cpt, billedByPct, allowedByPct, medicare (fixed
+       fee-schedule value or null where Medicare doesn't price the item separately). */
+    const mkItem = (id, name, desc, cpt, billed60, allowed60, medicare) =>
+      ({ id, name, desc, cpt, billedByPct: curve(billed60), allowedByPct: curve(allowed60), medicare });
+
+    const PRIMARY = mkItem('primary', 'Medical Procedure',
+      'Prostatectomy, retropubic radical, with or without nerve sparing; with bilateral pelvic lymphadenectomy',
+      '55845', 14084, 4295, 1370);
+
+    // Facility setting is a choice, not an add-on: exactly one applies.
+    const FACILITIES = [
+      mkItem('fac_asc', 'Ambulatory Surgical Center (ASC)', 'Facility fee, ambulatory surgical center setting', '55845-F', 39200, 18500, null),
+      mkItem('fac_hosp', 'Hospital (Outpatient)', 'Facility fee, hospital outpatient setting', '55845-F', 71285, 33661, null),
+    ];
+
+    /* ── Categories with sub-items ──
+       A category row with `children` is DERIVED: it carries no benchmark curve
+       of its own — its prices are the sum of its included children. All
+       calculators (percentile pins, typical-plan math) live on LEAF items only;
+       never attach controls or curves to a derived category row. */
+    const OPTIONAL = [
+      mkItem('anes', 'Anesthesia', 'Anesthesia for extraperitoneal procedures in lower abdomen; radical prostatectomy', '00865', 6085, 3304, null),
+      { id: 'ct', name: 'CT Scan and CT Guidance Procedures', desc: 'Ex. CT guidance for placement of radiation fields', cpt: 'Category',
+        children: [
+          mkItem('ct_prof', 'Medical Procedure', 'Guidance for localization of target volume for delivery of radiation treatment, includes intrafraction tracking, when performed', '77387', 929, 84, 41),
+          mkItem('ct_fac', 'Hospital (Outpatient)', 'Guidance for localization of target volume for delivery of radiation treatment, includes intrafraction tracking, when performed', '77387', 1589, 1322, null),
+        ] },
+      mkItem('docs', 'Doctor / Healthcare Professional Visits', 'Ex. office, outpatient, inpatient, home care', 'Category', 5647, 3561, 850),
+      mkItem('drugsAnes', 'Drugs Used for Anesthesia or Pain Management', 'Ex. Propofol (Diprivan), Hydromorphone (Dilaudid)', 'Category', 427, 36, 0),
+      mkItem('labBlood', 'Laboratory Tests — Blood Specimen', 'Ex. complete blood count, cholesterol test', 'Category', 3918, 923, 419),
+      mkItem('labOther', 'Laboratory Tests — Non-blood Specimen', 'Ex. urine, feces', 'Category', 493, 33, 5),
+      mkItem('medTests', 'Medical Tests / Exams', 'Ex. allergy tests, Holter monitor, preventive care', 'Category', 1120, 556, 179),
+      mkItem('otherDrugs', 'Other Non-Chemotherapy Drugs', 'Ex. Ringers Lactate, Zofran, Heparin', 'Category', 350, 31, 0),
+      mkItem('radiology', 'Other Radiology', 'Ex. radiation treatment, mammograms', 'Category', 105123, 57564, 8664),
+    ];
+    // Leaf items of an optional entry (the entry itself, or its children).
+    const leavesOf = (o) => o.children || [o];
+
+    /* ── Small shared pieces ── */
+    function PurpleLink({ children, href }) {
+      const [hover, setHover] = useState(false);
+      return h('a', { href: href || 'https://www.fairhealth.org', target: '_blank', rel: 'noopener noreferrer',
+        onMouseEnter: () => setHover(true), onMouseLeave: () => setHover(false), onFocus: () => setHover(true), onBlur: () => setHover(false),
+        style: { color: '#362C67', fontWeight: 700, textDecoration: hover ? 'underline' : 'none', cursor: 'pointer' } }, children);
+    }
+
+    /* ── Draggable percentile slider ──
+       Adapted from the main calculator's PriceSlider: one slider now drives the
+       whole page, so the thumb shows the percentile itself rather than any
+       single line item's price. */
+    function PercentileSlider({ value, onChange, color, label }) {
+      const sliderRef = useRef(null);
+      const [isDragging, setIsDragging] = useState(false);
+      const posFromPct = (p) => (PCTS.indexOf(p) / (PCTS.length - 1)) * 100;
+      const pctFromPos = (percent) => {
+        const i = Math.round((percent / 100) * (PCTS.length - 1));
+        return PCTS[Math.max(0, Math.min(PCTS.length - 1, i))];
+      };
+      const interact = (clientX) => {
+        if (!sliderRef.current) return;
+        const rect = sliderRef.current.getBoundingClientRect();
+        const percent = Math.max(0, Math.min(100, ((clientX - rect.left) / rect.width) * 100));
+        onChange(pctFromPos(percent));
+      };
+      useEffect(() => {
+        if (!isDragging) return;
+        const mm = (e) => interact(e.clientX);
+        const tm = (e) => interact(e.touches[0].clientX);
+        const end = () => setIsDragging(false);
+        window.addEventListener('mousemove', mm);
+        window.addEventListener('mouseup', end);
+        window.addEventListener('touchmove', tm);
+        window.addEventListener('touchend', end);
+        return () => {
+          window.removeEventListener('mousemove', mm);
+          window.removeEventListener('mouseup', end);
+          window.removeEventListener('touchmove', tm);
+          window.removeEventListener('touchend', end);
+        };
+      }, [isDragging]);
+      const thumb = posFromPct(value);
+      return h('div', { style: { width: '100%' } },
+        h('div', { style: { fontSize: 13, fontWeight: 700, marginBottom: 5, color: C.ink, display: 'flex', alignItems: 'center', gap: 6 } }, label),
+        h('div', { ref: sliderRef,
+          onMouseDown: (e) => { setIsDragging(true); interact(e.clientX); },
+          onTouchStart: (e) => { setIsDragging(true); interact(e.touches[0].clientX); },
+          role: 'slider', 'aria-valuemin': PCTS[0], 'aria-valuemax': PCTS[PCTS.length - 1], 'aria-valuenow': value,
+          'aria-valuetext': value + 'th percentile', 'aria-label': label, tabIndex: 0,
+          onKeyDown: (e) => {
+            const i = PCTS.indexOf(value);
+            if ((e.key === 'ArrowRight' || e.key === 'ArrowUp') && i < PCTS.length - 1) { e.preventDefault(); onChange(PCTS[i + 1]); }
+            if ((e.key === 'ArrowLeft' || e.key === 'ArrowDown') && i > 0) { e.preventDefault(); onChange(PCTS[i - 1]); }
+          },
+          style: { position: 'relative', height: 30, cursor: 'pointer', marginBottom: 2 } },
+          h('div', { style: { position: 'absolute', left: 0, right: 0, top: '50%', transform: 'translateY(-50%)', height: 10, background: '#D1D5DB', borderRadius: 5 } }),
+          h('div', { style: { position: 'absolute', left: 0, top: '50%', transform: 'translateY(-50%)', height: 10, width: thumb + '%', background: color, borderRadius: 5, transition: isDragging ? 'none' : 'width 0.15s ease-out' } }),
+          h('div', { style: { position: 'absolute', left: thumb + '%', top: '50%', transform: 'translate(-50%,-50%)', background: '#fff', border: '3px solid ' + color, borderRadius: 4, padding: '2px 8px', fontSize: 14, fontWeight: 800, color: C.ink, whiteSpace: 'nowrap', boxShadow: '0 2px 4px rgba(0,0,0,0.15)', transition: isDragging ? 'none' : 'left 0.15s ease-out', cursor: isDragging ? 'grabbing' : 'grab', zIndex: 2, fontVariantNumeric: 'tabular-nums' } }, value + 'th')
+        ),
+        h('div', { style: { display: 'flex', justifyContent: 'space-between', padding: '0 2px' } },
+          ...PCTS.map(p => h('button', { key: p, type: 'button', onClick: () => onChange(p), 'aria-label': p + 'th percentile',
+            style: { background: 'none', border: 'none', cursor: 'pointer', padding: 0, fontFamily: FONT } },
+            h('span', { style: { fontSize: 10.5, fontWeight: 600, color: C.ink, padding: '1px 4px', background: p === value ? '#FFEB99' : 'transparent', borderRadius: 3, transition: 'background 0.15s', display: 'block' } }, p + 'th')
+          ))
+        )
+      );
+    }
+
+    /* Filled/outlined price box, matching the SDM production layout. */
+    function PriceBox({ value, kind, dim, width }) {
+      const styles = {
+        billed: { background: C.teal, color: '#fff', border: '1px solid ' + C.teal },
+        allowed: { background: C.inn, color: '#fff', border: '1px solid ' + C.inn },
+        medicare: { background: '#fff', color: C.purple, border: '1.5px solid ' + C.purple },
+      }[kind];
+      return h('div', { style: { width: width || 108, textAlign: 'center', padding: '8px 6px', fontSize: 14.5, fontWeight: 800, fontVariantNumeric: 'tabular-nums', opacity: dim ? 0.4 : 1, transition: 'opacity 160ms ease', ...styles } }, value);
+    }
+
+    function App() {
+      const [percentile, setPercentile] = useState(60);
+      const [facility, setFacility] = useState('fac_hosp');
+      // Optional items default to included — the SDM page opens on the full episode.
+      // Inclusion is tracked at LEAF level; a category is "included" if any child is.
+      const [included, setIncluded] = useState(Object.fromEntries(OPTIONAL.flatMap(o => leavesOf(o).map(l => [l.id, true]))));
+      const [expanded, setExpanded] = useState({});
+      // Per-line percentile overrides: presence of an id pins that item to its
+      // own percentile; everything else follows the page-wide slider.
+      const [overrides, setOverrides] = useState({});
+
+      const toggleItem = (id) => setIncluded(s => ({ ...s, [id]: !s[id] }));
+      const toggleGroup = (group) => {
+        const anyOn = group.children.some(c => included[c.id]);
+        setIncluded(s => ({ ...s, ...Object.fromEntries(group.children.map(c => [c.id, !anyOn])) }));
+      };
+      const toggleExpand = (id) => setExpanded(s => ({ ...s, [id]: !s[id] }));
+      const pctFor = (item) => overrides[item.id] != null ? overrides[item.id] : percentile;
+      const stepOverride = (item, dir) => {
+        const i = PCTS.indexOf(pctFor(item));
+        const next = PCTS[Math.max(0, Math.min(PCTS.length - 1, i + dir))];
+        setOverrides(s => ({ ...s, [item.id]: next }));
+      };
+      const clearOverride = (id) => setOverrides(s => { const n = { ...s }; delete n[id]; return n; });
+      const overrideCount = Object.keys(overrides).length;
+
+      /* Included line items (leaves only), each at its own effective percentile. */
+      const facilityItem = FACILITIES.find(f => f.id === facility);
+      const includedItems = [PRIMARY, facilityItem, ...OPTIONAL.flatMap(o => leavesOf(o).filter(l => included[l.id]))];
+      const at = (item) => ({ billed: item.billedByPct[pctFor(item)], allowed: item.allowedByPct[pctFor(item)] });
+      const billedTotal = includedItems.reduce((s, it) => s + at(it).billed, 0);
+      const allowedTotal = includedItems.reduce((s, it) => s + at(it).allowed, 0);
+      const medicareTotal = includedItems.reduce((s, it) => s + (it.medicare || 0), 0);
+
+      /* ── Line-item row + expandable detail panel ── */
+      const detailRow = (label, val, opts = {}) =>
+        h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 14 } },
+          h('span', { style: { fontSize: 12.5, color: opts.strong ? C.ink : C.inkSoft, fontWeight: opts.strong ? 800 : 500, lineHeight: 1.4, display: 'inline-flex', alignItems: 'center', gap: 6 } }, opts.icon || null, label),
+          h('span', { style: { fontSize: opts.strong ? 16 : 13.5, fontWeight: 800, color: opts.color || C.ink, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' } }, val)
+        );
+
+      // Per-line "typical plan" settings for the out-of-network quick math:
+      // reimbursement basis (UCR percentile vs. Medicare fee schedule) and the
+      // typical plan-pays percentage. Generic assumptions — not entered benefits.
+      const [oonCalc, setOonCalc] = useState({});
+      const calcFor = (item) => oonCalc[item.id] || { basis: 'ucr', pay: 70 };
+      const setBasis = (item, basis) => setOonCalc(s => ({ ...s, [item.id]: { ...calcFor(item), basis } }));
+      const stepPay = (item, dir) => setOonCalc(s => {
+        const cur = calcFor(item);
+        return { ...s, [item.id]: { ...cur, pay: Math.max(0, Math.min(100, cur.pay + dir * 5)) } };
+      });
+      // Inline help panels (click-to-open \u2014 native tooltips don't fire on touch).
+      const [helpOpen, setHelpOpen] = useState({});
+      const toggleHelp = (key) => setHelpOpen(s => ({ ...s, [key]: !s[key] }));
+
+      const detailPanel = (item) => {
+        const { billed, allowed } = at(item);
+        const pinned = overrides[item.id] != null;
+        const effPct = pctFor(item);
+        const atMin = PCTS.indexOf(effPct) === 0;
+        const atMax = PCTS.indexOf(effPct) === PCTS.length - 1;
+        const cfg = calcFor(item);
+        const hasMedicare = item.medicare != null;
+        const basis = (!hasMedicare && cfg.basis !== 'ucr') ? 'ucr' : cfg.basis;
+        const payUcr = billed * (cfg.pay / 100);
+        const payMed = hasMedicare ? item.medicare * (cfg.pay / 100) : 0;
+        const oopUcr = Math.max(0, billed - payUcr);
+        const oopMed = Math.max(0, billed - payMed);
+        const hPct = !!helpOpen[item.id + ':pct'], hUcr = !!helpOpen[item.id + ':ucr'];
+        const darkBtn = (onClick, disabled, label, txt, size) =>
+          h('button', { onClick, disabled, 'aria-label': label,
+            style: { width: size || 36, height: size || 36, display: 'grid', placeItems: 'center', fontSize: 17, fontWeight: 800, color: '#fff', background: disabled ? '#B9BCD1' : C.purpleDeep, border: 'none', cursor: disabled ? 'default' : 'pointer', fontFamily: FONT } }, txt);
+        const helpBtn = (key, label) => {
+          const open = !!helpOpen[item.id + ':' + key];
+          return h('button', { onClick: () => toggleHelp(item.id + ':' + key), 'aria-expanded': open, 'aria-label': label,
+            style: { flexShrink: 0, width: 18, height: 18, display: 'grid', placeItems: 'center', fontSize: 11, fontWeight: 800, color: open ? '#fff' : C.purple, background: open ? C.purple : '#fff', border: '1.5px solid ' + C.purple, borderRadius: 999, cursor: 'pointer', fontFamily: FONT, padding: 0 } }, '?');
+        };
+        const helpPanel = (children) => h('div', { style: { border: '1px solid ' + C.line, background: '#F7F8FC', padding: '10px 12px', fontSize: 12, color: C.ink, lineHeight: 1.5 } }, children);
+        const basisBtn = (id, label, aria) => {
+          const on = basis === id;
+          const disabled = !hasMedicare && id !== 'ucr';
+          return h('button', { key: id, onClick: () => setBasis(item, id), disabled, 'aria-pressed': on,
+            'aria-label': aria + ' for ' + item.name + (disabled ? ' (unavailable, no Medicare price)' : ''),
+            style: { fontSize: 12, fontWeight: 700, padding: '8px 12px', minHeight: 36, cursor: disabled ? 'default' : 'pointer', fontFamily: FONT, background: on ? C.purple : '#fff', color: on ? '#fff' : (disabled ? '#B9BCD1' : C.inkSoft), border: '1px solid ' + (on ? C.purple : C.line), marginLeft: -1 } },
+            disabled ? label + ' \u00b7 N/A' : label);
+        };
+        // Receipt line: label + small qualifier on the left, amount on the right.
+        const rLine = (label, q, val, opts = {}) =>
+          h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 12, padding: '4px 0' } },
+            h('span', { style: { fontSize: opts.total ? 14 : 13, fontWeight: opts.total ? 800 : 500, color: opts.total ? C.ink : C.inkSoft, lineHeight: 1.4 } }, label,
+              q && h('span', { style: { fontSize: 11, color: C.inkSoft, fontWeight: 500 } }, ' ' + q)),
+            h('span', { 'aria-live': 'polite', style: { fontSize: opts.total ? 22 : 15, fontWeight: opts.total ? 800 : 700, color: opts.color || C.ink, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' } }, val));
+        // Price box with the label inside (wireframe style).
+        const priceCell = (label, val, kind) => {
+          const s = {
+            billed: { background: C.teal, color: '#fff', border: '1px solid ' + C.teal },
+            allowed: { background: C.inn, color: '#fff', border: '1px solid ' + C.inn },
+            medicare: { background: '#fff', color: C.purple, border: '1.5px solid ' + C.purple },
+          }[kind];
+          return h('div', { style: { flex: 1, minWidth: 120, padding: '8px 10px', ...s } },
+            h('div', { style: { fontSize: 11, lineHeight: 1.3 } }, label),
+            h('div', { style: { fontSize: 17, fontWeight: 800, marginTop: 2, fontVariantNumeric: 'tabular-nums' } }, val));
+        };
+
+        return h('div', { style: { background: '#fff', border: '1px solid ' + C.line, borderLeft: '4px solid ' + C.terra, padding: '16px 20px', margin: '0 0 4px', display: 'flex', flexDirection: 'column', gap: 0 } },
+
+          // ── Zone 1: what this item is, and its three reference prices ──
+          h('div', null,
+            h('div', { style: { fontSize: 15, fontWeight: 700, color: C.ink } }, item.name),
+            h('div', { style: { fontSize: 12, color: C.inkSoft, marginTop: 2 } }, item.desc + (item.cpt === 'Category' ? '' : ' \u00b7 CPT ' + item.cpt))),
+          h('div', { style: { display: 'flex', gap: 8, marginTop: 14, flexWrap: 'wrap' } },
+            priceCell('Provider billed charge', fmt(billed), 'billed'),
+            priceCell('In-network allowed', fmt(allowed), 'allowed'),
+            priceCell('Medicare price', fmtN(item.medicare), 'medicare')),
+          h('div', { style: { fontSize: 11, color: C.ink, marginTop: 8, lineHeight: 1.4 } },
+            'Billed = full price before discount \u00b7 Allowed = negotiated rate \u00b7 Medicare = fixed fee schedule'),
+
+          h('div', { style: { borderTop: '1px solid ' + C.line, margin: '14px 0' } }),
+
+          // ── Zone 2: this item's market percentile ──
+          h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap' } },
+            h('div', { style: { display: 'flex', alignItems: 'center', gap: 6 } },
+              h('div', null,
+                h('div', { style: { fontSize: 13, fontWeight: 700, color: C.ink } }, 'Market percentile for this item'),
+                h('div', { style: { fontSize: 11, color: C.inkSoft, marginTop: 2 } },
+                  (pinned ? 'Pinned to its own percentile' : 'Following the page slider') + ' \u00b7 the prices above shift with it')),
+              helpBtn('pct', 'What is the market percentile?')),
+            h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' } },
+              h('div', { style: { display: 'flex', alignItems: 'center', gap: 6 } },
+                darkBtn(() => stepOverride(item, -1), atMin, 'Lower percentile for ' + item.name, '\u2212'),
+                h('div', { 'aria-live': 'polite', style: { minWidth: 84, textAlign: 'center', padding: '7px 12px', fontSize: 14, fontWeight: 800, color: C.ink, background: pinned ? C.purpleTint : '#fff', border: '1px solid ' + (pinned ? C.purple : C.line), fontVariantNumeric: 'tabular-nums' } }, effPct + 'th'),
+                darkBtn(() => stepOverride(item, 1), atMax, 'Raise percentile for ' + item.name, '+')),
+              pinned && h('button', { onClick: () => clearOverride(item.id), 'aria-label': 'Reset ' + item.name + ' to the page percentile',
+                style: { fontSize: 12, fontWeight: 700, color: C.purple, background: '#fff', border: '1.5px solid ' + C.purple, borderRadius: 999, padding: '7px 14px', minHeight: 36, cursor: 'pointer', fontFamily: FONT } }, 'Reset (' + percentile + 'th)'))),
+          hPct && h('div', { style: { marginTop: 10 } }, helpPanel(
+            'Providers in this area charge a range of prices for the same service. The ' + effPct + 'th percentile means ' + effPct + '% of providers charge this much or less. Raise it to see what pricier providers charge; lower it for the more affordable end.')),
+
+          h('div', { style: { borderTop: '1px solid ' + C.line, margin: '14px 0 16px' } }),
+
+          // ── Zone 3: out-of-network scenario card with receipt ──
+          h('div', { style: { border: '1px solid ' + C.line, padding: '16px 18px' } },
+            h('div', { style: { fontSize: 13, fontWeight: 700, color: C.ink } }, 'If this item is out of network'),
+            h('div', { style: { fontSize: 12, color: C.inkSoft, margin: '2px 0 14px' } }, 'What a typical plan leaves you to pay, at the ' + effPct + 'th percentile'),
+
+            h('div', { style: { display: 'flex', gap: 16, flexWrap: 'wrap', marginBottom: hUcr ? 10 : 16 } },
+              h('div', { style: { flex: 1, minWidth: 200 } },
+                h('div', { style: { fontSize: 11, color: C.inkSoft, marginBottom: 5, display: 'flex', alignItems: 'center', gap: 5 } }, 'Reimbursement basis', helpBtn('ucr', 'What does UCR mean?')),
+                h('div', { role: 'group', 'aria-label': 'Reimbursement basis for ' + item.name, style: { display: 'flex' } },
+                  basisBtn('ucr', 'UCR', 'UCR-based reimbursement basis'),
+                  basisBtn('medicare', 'Medicare', 'Medicare-based reimbursement basis'),
+                  basisBtn('compare', 'Compare', 'Compare UCR and Medicare bases'))),
+              h('div', null,
+                h('div', { style: { fontSize: 11, color: C.inkSoft, marginBottom: 5 } }, 'Typical plan pays'),
+                h('div', { style: { display: 'flex', alignItems: 'center', gap: 6 } },
+                  darkBtn(() => stepPay(item, -1), cfg.pay <= 0, 'Lower typical plan payment percentage for ' + item.name, '\u2212', 32),
+                  h('div', { 'aria-live': 'polite', style: { minWidth: 56, textAlign: 'center', padding: '6px 8px', fontSize: 13, fontWeight: 800, color: C.ink, background: '#fff', border: '1px solid ' + C.line, fontVariantNumeric: 'tabular-nums' } }, cfg.pay + '%'),
+                  darkBtn(() => stepPay(item, 1), cfg.pay >= 100, 'Raise typical plan payment percentage for ' + item.name, '+', 32)))),
+            hUcr && h('div', { style: { marginBottom: 14 } }, helpPanel(h(Fragment, null,
+              h('strong', null, 'UCR \u2014 Usual, Customary and Reasonable. '),
+              'Many plans base out-of-network payments on a percentage of what providers in your area typically charge, rather than on the Medicare fee schedule. UCR-based reimbursement usually leaves you owing less than Medicare-based.'))),
+            !hasMedicare && h('div', { style: { fontSize: 11.5, color: C.inkSoft, marginBottom: 14 } }, 'N/A: no separate Medicare price exists for this item, so only the UCR basis is available.'),
+
+            h('div', { style: { border: '1px solid ' + C.line, padding: '10px 14px' } },
+              rLine('Typical provider charge', '(' + effPct + 'th pct)', fmt(billed)),
+              rLine('Typical plan pays', '(' + cfg.pay + '% of ' + (basis === 'medicare' ? 'Medicare' : 'UCR') + ')', '\u2212 ' + fmt(basis === 'medicare' ? payMed : payUcr), { color: C.green }),
+              basis === 'compare' && hasMedicare && oopMed > oopUcr && h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10, padding: '7px 10px', margin: '4px 0', border: '1.5px dashed ' + C.terra, background: C.terraTint } },
+                h('span', { style: { fontSize: 12, color: C.ink, lineHeight: 1.4 } }, 'A Medicare-based plan would pay only ', h('strong', null, fmt(payMed)), ' \u2014 leaving you ', h('strong', null, fmt(oopMed - oopUcr)), ' more to pay'),
+                h(AlertTriangle, { size: 15, color: C.terra, style: { flexShrink: 0 } })),
+              h('div', { style: { borderTop: '1px solid ' + C.ink, margin: '8px 0' } }),
+              rLine(basis === 'compare' ? 'Your typical out-of-pocket \u2014 UCR-based' : 'Your typical out-of-pocket', null, fmt(basis === 'medicare' ? oopMed : oopUcr), { total: true }),
+              basis === 'compare' && hasMedicare && rLine('Medicare-based plan', null, fmt(oopMed), { color: C.terra })),
+
+            h('div', { style: { fontSize: 11, color: C.ink, marginTop: 12, lineHeight: 1.5 } },
+              '\u201cTypical\u201d means common plan provisions, not your plan. Your deductible, out-of-pocket max, and coverage terms will change this number.'))
+        );
+      };
+
+      const lineRow = (item, control, indent, padY) => {
+        const isIncl = includedItems.some(i => i.id === item.id);
+        const isOpen = !!expanded[item.id];
+        const { billed, allowed } = at(item);
+        return h('div', { key: item.id, style: { borderBottom: '1px solid ' + C.line, background: isIncl ? 'transparent' : '#FAFAFC' } },
+          h('div', { style: { display: 'flex', alignItems: 'center', gap: 12, padding: (padY || 12) + 'px 0', paddingLeft: indent ? 34 : 0, borderLeft: indent ? '3px solid ' + C.purpleTint : 'none' } },
+            h('button', { onClick: () => toggleExpand(item.id), 'aria-expanded': isOpen, 'aria-label': (isOpen ? 'Hide' : 'Show') + ' details for ' + item.name,
+              style: { flexShrink: 0, width: 70, minHeight: 40, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 4, fontSize: 11.5, fontWeight: 700, color: C.purple, background: isOpen ? C.purpleTint : 'none', border: 'none', borderRadius: 999, cursor: 'pointer', fontFamily: FONT } },
+              h(ChevronDown, { size: 15, color: C.purple, style: { transform: isOpen ? 'rotate(180deg)' : 'none', transition: 'transform 220ms ease', flexShrink: 0 } }),
+              isOpen ? 'Hide' : 'Details'),
+            h('div', { style: { width: 76, flexShrink: 0 } }, control),
+            h('div', { style: { flex: 1, minWidth: 0, opacity: isIncl ? 1 : 0.55, transition: 'opacity 160ms ease' } },
+              h('div', { style: { fontSize: 14, fontWeight: 600, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' } }, item.name,
+                overrides[item.id] != null && h('span', { style: { fontSize: 10.5, fontWeight: 800, color: C.purple, background: C.purpleTint, border: '1px solid ' + C.purple, borderRadius: 999, padding: '2px 9px', whiteSpace: 'nowrap' } }, 'Pinned at ' + overrides[item.id] + 'th')),
+              h('div', { style: { fontSize: 11.5, color: C.inkSoft } }, item.desc),
+              h('div', { style: { fontSize: 11, color: C.inkSoft, marginTop: 2 } }, item.cpt === 'Category' ? 'Category of related services' : 'CPT ' + item.cpt)
+            ),
+            h(PriceBox, { value: fmt(billed), kind: 'billed', dim: !isIncl }),
+            h(PriceBox, { value: fmt(allowed), kind: 'allowed', dim: !isIncl }),
+            h(PriceBox, { value: fmtN(item.medicare), kind: 'medicare', dim: !isIncl })
+          ),
+          isOpen && h('div', { style: { marginLeft: indent ? 204 : 170 } }, detailPanel(item))
+        );
+      };
+
+      /* Derived category row: prices are sums of INCLUDED children at each
+         child's own effective percentile. No pin, no detail calculator here —
+         those live on the leaves. */
+      const groupRow = (group) => {
+        const kids = group.children;
+        const inclKids = kids.filter(c => included[c.id]);
+        const anyIncl = inclKids.length > 0;
+        const sumKids = anyIncl ? inclKids : kids; // when fully removed, show dimmed full-group sums
+        const billedSum = sumKids.reduce((s, c) => s + at(c).billed, 0);
+        const allowedSum = sumKids.reduce((s, c) => s + at(c).allowed, 0);
+        const medVals = sumKids.filter(c => c.medicare != null);
+        const medSum = medVals.length ? medVals.reduce((s, c) => s + c.medicare, 0) : null;
+        const anyPinned = inclKids.some(c => overrides[c.id] != null);
+        const isOpen = !!expanded[group.id];
+        const groupPill = h('button', { onClick: () => toggleGroup(group), 'aria-pressed': anyIncl, 'aria-label': (anyIncl ? 'Remove all of ' : 'Add all of ') + group.name,
+          style: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 4, fontSize: 11.5, fontWeight: 700, cursor: 'pointer', borderRadius: 999, padding: '4px 10px', minHeight: 30, border: '1.5px solid ' + (anyIncl ? C.green : C.purple), background: '#fff', color: anyIncl ? C.green : C.purple, transition: 'all 160ms ease', fontFamily: FONT } },
+          anyIncl ? 'Remove' : h(Fragment, null, h(Plus, { size: 12, color: C.purple }), 'Add'));
+        return h('div', { key: group.id, style: { borderBottom: isOpen ? 'none' : '1px solid ' + C.line, background: anyIncl ? 'transparent' : '#FAFAFC' } },
+          h('div', { style: { display: 'flex', alignItems: 'center', gap: 12, padding: '12px 0' } },
+            h('button', { onClick: () => toggleExpand(group.id), 'aria-expanded': isOpen, 'aria-label': (isOpen ? 'Hide' : 'Show') + ' the items inside ' + group.name,
+              style: { flexShrink: 0, width: 70, minHeight: 40, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 4, fontSize: 11.5, fontWeight: 700, color: C.purple, background: isOpen ? C.purpleTint : 'none', border: 'none', borderRadius: 999, cursor: 'pointer', fontFamily: FONT } },
+              h(ChevronDown, { size: 15, color: C.purple, style: { transform: isOpen ? 'rotate(180deg)' : 'none', transition: 'transform 220ms ease', flexShrink: 0 } }),
+              isOpen ? 'Hide' : kids.length + ' items'),
+            h('div', { style: { width: 76, flexShrink: 0 } }, groupPill),
+            h('div', { style: { flex: 1, minWidth: 0, opacity: anyIncl ? 1 : 0.55, transition: 'opacity 160ms ease' } },
+              h('div', { style: { fontSize: 14, fontWeight: 600, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' } }, group.name,
+                anyPinned && h('span', { style: { fontSize: 10.5, fontWeight: 800, color: C.purple, background: C.purpleTint, border: '1px solid ' + C.purple, borderRadius: 999, padding: '2px 9px', whiteSpace: 'nowrap' } }, 'Contains pinned items')),
+              h('div', { style: { fontSize: 11.5, color: C.inkSoft } }, group.desc),
+              h('div', { style: { fontSize: 11, color: C.inkSoft, marginTop: 2 } },
+                'Category \u00b7 sum of ' + (anyIncl ? inclKids.length : 0) + ' of ' + kids.length + ' items below')
+            ),
+            h(PriceBox, { value: fmt(billedSum), kind: 'billed', dim: !anyIncl }),
+            h(PriceBox, { value: fmt(allowedSum), kind: 'allowed', dim: !anyIncl }),
+            h(PriceBox, { value: fmtN(medSum), kind: 'medicare', dim: !anyIncl })
+          ),
+          isOpen && h('div', null, ...kids.map(c => lineRow(c, togglePill(c), true)))
+        );
+      };
+
+      /* Controls: Included label / Add-Remove pill / facility radio. */
+      const includedLabel = h('span', { style: { fontSize: 13, fontStyle: 'italic', color: C.ink } }, 'Included');
+      const togglePill = (item) => {
+        const on = !!included[item.id];
+        return h('button', { onClick: () => toggleItem(item.id), 'aria-pressed': on, 'aria-label': (on ? 'Remove ' : 'Add ') + item.name,
+          style: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 4, fontSize: 11.5, fontWeight: 700, cursor: 'pointer', borderRadius: 999, padding: '4px 10px', minHeight: 30, border: '1.5px solid ' + (on ? C.green : C.purple), background: '#fff', color: on ? C.green : C.purple, transition: 'all 160ms ease', fontFamily: FONT } },
+          on ? 'Remove' : h(Fragment, null, h(Plus, { size: 12, color: C.purple }), 'Add'));
+      };
+      const facilityRadio = (item) => {
+        const on = facility === item.id;
+        return h('button', { onClick: () => setFacility(item.id), role: 'radio', 'aria-checked': on, 'aria-label': 'Use ' + item.name + ' setting',
+          style: { display: 'inline-flex', alignItems: 'center', gap: 7, background: 'none', border: 'none', cursor: 'pointer', padding: '6px 0', minHeight: 36, fontFamily: FONT } },
+          h('span', { style: { width: 18, height: 18, borderRadius: 999, border: '2px solid ' + (on ? C.green : C.inkSoft), display: 'grid', placeItems: 'center', flexShrink: 0 } },
+            on && h('span', { style: { width: 9, height: 9, borderRadius: 999, background: C.green } })),
+          h('span', { style: { fontSize: 12.5, fontWeight: 700, color: on ? C.green : C.inkSoft } }, on ? 'Selected' : 'Select'));
+      };
+
+      const colHeads = h('div', { style: { display: 'flex', alignItems: 'flex-end', gap: 12, padding: '10px 0 8px', borderBottom: '2px solid ' + C.line } },
+        h('div', { style: { flex: 1, display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' } },
+          h('span', { style: { fontSize: 13.5, fontWeight: 800, color: C.ink } }, 'Treatment cost line items'),
+          h('span', { style: { fontSize: 12, fontWeight: 600, color: C.ink, background: '#FFEB99', borderRadius: 999, padding: '4px 12px', whiteSpace: 'nowrap' } }, percentile + 'th percentile' + (overrideCount > 0 ? ' \u00b7 page setting' : ''))),
+        ...[['Provider Billed Charge', C.teal], ['In-Network Allowed Amount', C.inn], ['Medicare Price', C.purple]].map(([t, col]) =>
+          h('div', { key: t, style: { width: 108, fontSize: 10.5, fontWeight: 700, letterSpacing: '0.03em', textTransform: 'uppercase', color: col, textAlign: 'center', lineHeight: 1.3 } }, t))
+      );
+
+      return h('div', { style: { fontFamily: FONT, color: C.ink, minHeight: '100vh' } },
+        h('div', { style: { padding: '24px 20px 140px' } },
+          h('div', { style: { maxWidth: 960, margin: '0 auto', display: 'flex', flexDirection: 'column', gap: 14 } },
+
+            // ── Header card: scenario + shared percentile sliders ──
+            h('div', { style: { background: '#fff', borderLeft: '6px solid ' + C.terra, boxShadow: '0 1px 3px rgba(31,35,48,0.06)', padding: '18px 20px', display: 'flex', gap: 28, flexWrap: 'wrap', alignItems: 'flex-start' } },
+              h('div', { style: { flex: '1 1 0', minWidth: 260 } },
+                h('div', { style: { fontSize: 11, fontWeight: 700, color: C.terra, letterSpacing: '0.04em', textTransform: 'uppercase', marginBottom: 4 } }, 'Shared Decision Making \u00b7 Treatment costs'),
+                h('div', { style: { fontSize: 19, fontWeight: 800, lineHeight: 1.3 } }, SCENARIO.condition),
+                h('div', { style: { fontSize: 13.5, fontWeight: 600, color: C.ink, marginTop: 2 } }, SCENARIO.treatment),
+                h('div', { style: { fontSize: 12.5, color: C.inkSoft, marginTop: 4 } }, SCENARIO.location)
+              ),
+              h('div', { style: { flex: '0 1 50%', maxWidth: '50%', minWidth: 300, display: 'flex', flexDirection: 'column', gap: 2 } },
+                h(PercentileSlider, { value: percentile, onChange: setPercentile, color: C.purple, label: 'Price Percentile' }),
+                h('div', { style: { fontSize: 11.5, color: C.ink, lineHeight: 1.45, marginTop: 6 } },
+                  'Higher percentiles show what pricier providers in this area charge. Medicare prices come from a fixed fee schedule, so they don\u2019t change with the percentile.')
+              )
+            ),
+
+            // ── Line items card ──
+            h('div', { style: { background: '#fff', boxShadow: '0 1px 3px rgba(31,35,48,0.06)', padding: '6px 20px 14px' } },
+              colHeads,
+              overrideCount > 0 && h('div', { style: { display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', padding: '10px 0 2px' } },
+                h('span', { style: { fontSize: 11.5, fontWeight: 700, color: C.purple } },
+                  overrideCount + (overrideCount === 1 ? ' item is pinned to its own percentile' : ' items are pinned to their own percentiles')),
+                h('button', { onClick: () => setOverrides({}),
+                  style: { fontSize: 11.5, fontWeight: 700, color: C.purple, background: '#fff', border: '1.5px solid ' + C.purple, borderRadius: 999, padding: '6px 12px', minHeight: 32, cursor: 'pointer', fontFamily: FONT } }, 'Reset all to page setting')),
+
+              // Primary procedure — always included
+              h('div', { style: { fontSize: 11, fontWeight: 700, color: C.ink, letterSpacing: '0.03em', textTransform: 'uppercase', padding: '12px 0 0' } }, 'Primary medical procedure'),
+              h('div', { style: { fontSize: 11.5, color: C.ink, lineHeight: 1.5, padding: '8px 0 10px', borderBottom: '1px solid ' + C.line } },
+                'Select \u201cDetails\u201d on any line to see its prices, pin it to its own percentile, and estimate what a typical plan would pay if it\u2019s out of network.'),
+              lineRow(PRIMARY, includedLabel, false, 24),
+
+              // Facility — pick one setting
+              h('div', { style: { fontSize: 11, fontWeight: 700, color: C.ink, letterSpacing: '0.03em', textTransform: 'uppercase', padding: '14px 0 0' } }, 'Facility costs \u2014 choose the setting'),
+              h('div', { role: 'radiogroup', 'aria-label': 'Facility setting' }, ...FACILITIES.map(f => lineRow(f, facilityRadio(f)))),
+
+              // Related costs — toggleable
+              h('div', { style: { fontSize: 11, fontWeight: 700, color: C.ink, letterSpacing: '0.03em', textTransform: 'uppercase', padding: '14px 0 0' } }, 'Related services \u2014 add or remove'),
+              ...OPTIONAL.map(o => o.children ? groupRow(o) : lineRow(o, togglePill(o)))
+            ),
+
+            // ── Footer disclaimer ──
+            h('div', { style: { fontSize: 11.5, color: C.inkSoft, lineHeight: 1.55, padding: '0 4px' } },
+              'Estimates are based on ', h(PurpleLink, null, 'FAIR Health Benchmarks'), ' \u2014 independent area cost data drawn from billions of claims. They do not reflect plan-specific negotiated pricing. Line-item values and percentile curves are illustrative pending benchmark tables. This is a cost estimate, not a quote \u2014 confirm details with your insurer. Learn more about licensing FAIR Health benchmark data at ', h(PurpleLink, null, 'fairhealth.org'), '.')
+          )
+        ),
+
+        // ── Sticky Total Cost bar ──
+        h('div', { style: { position: 'sticky', bottom: 0, background: C.purpleDeep, color: '#fff', boxShadow: '0 -4px 16px rgba(31,35,48,0.16)' } },
+          h('div', { style: { maxWidth: 960, margin: '0 auto', padding: '14px 22px', display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 18, flexWrap: 'wrap' } },
+            h('div', { style: { fontSize: 24, fontWeight: 800, letterSpacing: '0.01em', alignSelf: 'center' } }, 'Total Cost'),
+            h('div', { 'aria-live': 'polite', style: { display: 'flex', gap: 11, flexWrap: 'wrap' } },
+              ...[
+                ['Provider Billed Charge', fmt(billedTotal), C.teal, '#fff', null],
+                ['In-Network Allowed Amount', fmt(allowedTotal), C.inn, '#fff', null],
+                ['Medicare Price', fmt(medicareTotal), 'outline', '#fff', 'Where a Medicare price exists'],
+              ].map(([label, val, bg, color, caption]) =>
+                h('div', { key: label, style: { width: 122, textAlign: 'center' } },
+                  h('div', { style: { fontSize: 10, fontWeight: 700, letterSpacing: '0.03em', textTransform: 'uppercase', color: 'rgba(255,255,255,0.85)', lineHeight: 1.25, marginBottom: 6, minHeight: 25 } }, label),
+                  h('div', { style: bg === 'outline'
+                      ? { background: 'transparent', border: '1.5px solid rgba(255,255,255,0.75)', padding: '8px 8px' }
+                      : { background: bg, padding: '9px 8px' } },
+                    h('div', { style: { fontSize: 19, fontWeight: 800, color, fontVariantNumeric: 'tabular-nums' } }, val)),
+                  caption && h('div', { style: { fontSize: 10, color: 'rgba(255,255,255,0.8)', marginTop: 5, lineHeight: 1.3, textAlign: 'left' } }, caption)
+                ))
+            )
+          )
+        )
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(h(App));
+  </script>
+</body>
+</html>
